@@ -214,17 +214,15 @@ pub struct InputAudio {
 }
 
 #[derive(Debug, Serialize, Deserialize, PartialEq, Clone)]
-pub struct ToolResultContent {
-    #[serde(default)]
-    r#type: ToolResultContentType,
-    pub text: String,
-}
-
-#[derive(Default, Debug, Serialize, Deserialize, PartialEq, Clone)]
-#[serde(rename_all = "lowercase")]
-pub enum ToolResultContentType {
-    #[default]
-    Text,
+#[serde(tag = "type", rename_all = "lowercase")]
+pub enum ToolResultContent {
+    Text {
+        text: String,
+    },
+    #[serde(rename = "image_url")]
+    ImageUrl {
+        image_url: ImageUrl,
+    },
 }
 
 impl FromStr for ToolResultContent {
@@ -237,10 +235,7 @@ impl FromStr for ToolResultContent {
 
 impl From<String> for ToolResultContent {
     fn from(s: String) -> Self {
-        ToolResultContent {
-            r#type: ToolResultContentType::default(),
-            text: s,
-        }
+        ToolResultContent::Text { text: s }
     }
 }
 
@@ -332,11 +327,64 @@ impl TryFrom<message::Message> for Vec<Message> {
                                 tool_call_id: id,
                                 content: content.try_map(|content| match content {
                                     message::ToolResultContent::Text(message::Text { text }) => {
-                                        Ok(text.into())
+                                        Ok(ToolResultContent::Text { text })
                                     }
-                                    _ => Err(message::MessageError::ConversionError(
-                                        "Tool result content does not support non-text".into(),
-                                    )),
+                                    message::ToolResultContent::Image(message::Image {
+                                        data,
+                                        detail,
+                                        media_type,
+                                        ..
+                                    }) => match data {
+                                        DocumentSourceKind::Url(url) | DocumentSourceKind::String(url) => {
+                                            Ok(ToolResultContent::ImageUrl {
+                                                image_url: ImageUrl {
+                                                    url,
+                                                    detail: detail.unwrap_or_default(),
+                                                },
+                                            })
+                                        }
+                                        DocumentSourceKind::Base64(data) => {
+                                            let url = format!(
+                                                "data:{};base64,{}",
+                                                media_type.map(|i| i.to_mime_type()).ok_or(
+                                                    message::MessageError::ConversionError(
+                                                        "OpenAI Image URI must have media type".into()
+                                                    )
+                                                )?,
+                                                data
+                                            );
+                                            Ok(ToolResultContent::ImageUrl {
+                                                image_url: ImageUrl {
+                                                    url,
+                                                    detail: detail.unwrap_or_default(),
+                                                },
+                                            })
+                                        }
+                                        DocumentSourceKind::Raw(data) => {
+                                            let base64 = base64::Engine::encode(
+                                                &base64::engine::general_purpose::STANDARD,
+                                                data,
+                                            );
+                                            let url = format!(
+                                                "data:{};base64,{}",
+                                                media_type.map(|i| i.to_mime_type()).ok_or(
+                                                    message::MessageError::ConversionError(
+                                                        "OpenAI Image URI must have media type".into()
+                                                    )
+                                                )?,
+                                                base64
+                                            );
+                                            Ok(ToolResultContent::ImageUrl {
+                                                image_url: ImageUrl {
+                                                    url,
+                                                    detail: detail.unwrap_or_default(),
+                                                },
+                                            })
+                                        }
+                                        doc => Err(message::MessageError::ConversionError(
+                                            format!("Unsupported document source in tool result: {doc:?}")
+                                        )),
+                                    },
                                 })?,
                             }),
                             _ => unreachable!(),
@@ -546,7 +594,16 @@ impl TryFrom<Message> for message::Message {
             } => message::Message::User {
                 content: OneOrMany::one(message::UserContent::tool_result(
                     tool_call_id,
-                    content.map(|content| message::ToolResultContent::text(content.text)),
+                    content.map(|content| match content {
+                        ToolResultContent::Text { text } => message::ToolResultContent::text(text),
+                        ToolResultContent::ImageUrl { image_url } => {
+                            message::ToolResultContent::image_url(
+                                image_url.url,
+                                None,
+                                Some(image_url.detail),
+                            )
+                        }
+                    }),
                 )),
             },
 
