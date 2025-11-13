@@ -38,7 +38,7 @@ pub struct CompletionModel<T = reqwest::Client> {
 }
 
 impl<T> CompletionModel<T> {
-    pub(crate) fn create_completion_request(
+    pub fn create_completion_request(
         &self,
         completion_request: completion::CompletionRequest,
     ) -> Result<Value, CompletionError> {

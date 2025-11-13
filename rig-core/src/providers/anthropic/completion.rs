@@ -17,7 +17,7 @@ use crate::completion::CompletionRequest;
 use crate::providers::anthropic::streaming::StreamingCompletionResponse;
 use bytes::Bytes;
 use serde::{Deserialize, Serialize};
-use serde_json::json;
+use serde_json::{json, Value};
 use tracing::{Instrument, info_span};
 
 // ================================================================
@@ -668,6 +668,74 @@ where
             default_max_tokens: calculate_max_tokens(model),
         }
     }
+
+    pub fn create_completion_request(
+        &self,
+        completion_request: completion::CompletionRequest,
+    ) -> Result<Value, CompletionError> {
+        // Check if max_tokens is set, required for Anthropic
+        let max_tokens = if let Some(tokens) = completion_request.max_tokens {
+            tokens
+        } else if let Some(tokens) = self.default_max_tokens {
+            tokens
+        } else {
+            return Err(CompletionError::RequestError(
+                "`max_tokens` must be set for Anthropic".into(),
+            ));
+        };
+
+        let mut full_history = vec![];
+        if let Some(docs) = completion_request.normalized_documents() {
+            full_history.push(docs);
+        }
+        full_history.extend(completion_request.chat_history);
+
+        let full_history = full_history
+            .into_iter()
+            .map(Message::try_from)
+            .collect::<Result<Vec<Message>, _>>()?;
+
+        let mut request = json!({
+            "model": self.model,
+            "messages": full_history,
+            "max_tokens": max_tokens,
+            "system": completion_request.preamble.unwrap_or("".to_string()),
+        });
+
+        if let Some(temperature) = completion_request.temperature {
+            json_utils::merge_inplace(&mut request, json!({ "temperature": temperature }));
+        }
+
+        let tool_choice = if let Some(tool_choice) = completion_request.tool_choice {
+            Some(ToolChoice::try_from(tool_choice)?)
+        } else {
+            None
+        };
+
+        if !completion_request.tools.is_empty() {
+            json_utils::merge_inplace(
+                &mut request,
+                json!({
+                    "tools": completion_request
+                        .tools
+                        .into_iter()
+                        .map(|tool| ToolDefinition {
+                            name: tool.name,
+                            description: Some(tool.description),
+                            input_schema: tool.parameters,
+                        })
+                        .collect::<Vec<_>>(),
+                    "tool_choice": tool_choice,
+                }),
+            );
+        }
+
+        if let Some(ref params) = completion_request.additional_params {
+            json_utils::merge_inplace(&mut request, params.clone())
+        }
+
+        Ok(request)
+    }
 }
 
 /// Anthropic requires a `max_tokens` parameter to be set, which is dependent on the model. If not
@@ -766,67 +834,7 @@ where
         // specific requirements of each provider. For now, we just manually check while
         // building the request as a raw JSON document.
 
-        // Check if max_tokens is set, required for Anthropic
-        let max_tokens = if let Some(tokens) = completion_request.max_tokens {
-            tokens
-        } else if let Some(tokens) = self.default_max_tokens {
-            tokens
-        } else {
-            return Err(CompletionError::RequestError(
-                "`max_tokens` must be set for Anthropic".into(),
-            ));
-        };
-
-        let mut full_history = vec![];
-        if let Some(docs) = completion_request.normalized_documents() {
-            full_history.push(docs);
-        }
-        full_history.extend(completion_request.chat_history);
-        span.record_model_input(&full_history);
-
-        let full_history = full_history
-            .into_iter()
-            .map(Message::try_from)
-            .collect::<Result<Vec<Message>, _>>()?;
-
-        let mut request = json!({
-            "model": self.model,
-            "messages": full_history,
-            "max_tokens": max_tokens,
-            "system": completion_request.preamble.unwrap_or("".to_string()),
-        });
-
-        if let Some(temperature) = completion_request.temperature {
-            json_utils::merge_inplace(&mut request, json!({ "temperature": temperature }));
-        }
-
-        let tool_choice = if let Some(tool_choice) = completion_request.tool_choice {
-            Some(ToolChoice::try_from(tool_choice)?)
-        } else {
-            None
-        };
-
-        if !completion_request.tools.is_empty() {
-            json_utils::merge_inplace(
-                &mut request,
-                json!({
-                    "tools": completion_request
-                        .tools
-                        .into_iter()
-                        .map(|tool| ToolDefinition {
-                            name: tool.name,
-                            description: Some(tool.description),
-                            input_schema: tool.parameters,
-                        })
-                        .collect::<Vec<_>>(),
-                    "tool_choice": tool_choice,
-                }),
-            );
-        }
-
-        if let Some(ref params) = completion_request.additional_params {
-            json_utils::merge_inplace(&mut request, params.clone())
-        }
+        let request = self.create_completion_request(completion_request)?;
 
         async move {
             let request: Vec<u8> = serde_json::to_vec(&request)?;

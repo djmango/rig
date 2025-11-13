@@ -175,7 +175,7 @@ impl<T> CompletionModel<T> {
         }
     }
 
-    pub(crate) fn create_completion_request(
+    pub fn create_completion_request(
         &self,
         completion_request: CompletionRequest,
     ) -> Result<Value, CompletionError> {
